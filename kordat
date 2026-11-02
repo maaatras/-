@@ -1,0 +1,311 @@
+!!bb Ключи основной процедуры
+
+! Ключ                 
+restart = 0;            
+title = 'VD.035.004';
+dt_max = 0.001;         
+dt_out = 0.1;           
+fin_tim = 210;           
+dt_sav = 0;             
+append_res = 1;         
+append_sav = 0;         
+! noption = '2,3,7,10';
+check_only = 0;         
+local_err = 1.0e-4;     
+ngas = 'H2O, N2, O2';   
+dt_diag = dt_out;       
+inf = 1;                
+accel_stat = 0;         
+nwsp_dat='nwsp_dat';
+_tauRest = 0.; ! момент рестарта
+_debug = 0; ! вывод отладочной информации
+_diag = 0;  ! режим вывода диагностики
+            ! 0 - нет диагностики
+            ! 1 - краткая
+            ! 2 - расширенная
+_monPer = 5.0;    ! Период вывода диагностики в файл мониторинга
+!!eb
+
+!!bb Общие глобальные переменные
+! Константы
+_t0C = 273.15;
+_tOffset = _t0C;
+_pi = acos(-1);
+_gg = 9.81;
+_RHO_W = 1000.;           ! плотность воды, кг/м3 (20 C, 1 МПа ~ 998)
+_xgAir(1:4) = 0.,0.,0.757,0.243;
+_xgN2(1:4) = 0.,0.,9.999e-1,0.;
+_pAtm = 101.3e+03;
+_tAtm = 20.+_tOffset;
+_tsAtm = WS1P1(1,'P',_pAtm,2);
+_kgs = 98066.5;  ! кгс/см2, Па
+_MPa = 1.e6; ! МПа, Па 
+_kPa = 1.e3; ! МПа, Па
+_MWt = 1.e6; ! МПа, Па
+_kWt = 1.e3; ! МПа, Па
+_atm = 101325.; ! атм, Па
+_bar = 1.e5; ! бар, Па
+_timeMon = 0.;    ! Вспомогательные переменные диагностики
+_timeMonOld = 0.; ! -//-
+! Свойства проводника тепла
+_tlamStal(1:2,1:2) = 
+  273.,   50.
+ ,1000.,  50.;
+_thcStal(1:2,1:2) = 
+  273.,   500.
+ ,1000.,  500.;
+_troStal(1:2,1:2) = 
+  273.,   7800.
+ ,1000.,  7800.;
+
+! Датчики
+_sensor(1:20) = 0.;
+
+! --- Характеристика насоса H(Q) ---
+_NH_pump = 9;
+_H_pump(1:9) = 21.20, 21.35, 21.42, 21.40, 21.32, 21.20, 21.00, 20.65, 20.10;
+_Q_pump(1:9) = 11.0,  13.0,  15.0,  17.0,  19.0,  21.0,  24.0,  28.0,  31.5;
+
+! --- Рабочие переменные для EVENT ---
+_G_pump      = 0.;        ! массовый расход через насос, кг/с
+_Q_pump_curr = 0.;        ! объёмный расход через насос, м3/ч
+_H_pump_curr = 0.;        ! текущий напор, м
+_G_valve     = 0.;        ! массовый расход через клапан VAL1, кг/с
+_Q_valve     = 0.;        ! объёмный расход через клапан VAL1, м3/ч
+_S_val       = 0.;        ! текущее положение штока клапана
+_N_step      = 0;         ! счётчик ступеней открытия
+_dS          = 0.25;       ! шаг изменения штока
+_DT_step     = 20.;       ! время на одну ступень, с
+_S_max       = 1.0;       ! максимальное положение штока
+_S_start     = 0.0;       ! начальное положение штока
+_T_ramp   = 200.;         ! время полного открытия, с
+_T_begin  = 5.;           ! момент начала открытия, с
+
+_n0 = 3;
+
+MAIN:
+_FIRST_mon   = 1;
+_N_call_mon  = 0;
+_N_spike_mon = 0;
+_Q_valve_old = 0.;
+_TAU_mon_old = 0.;
+_S_val_buf   = 0.;
+_Q_valve_buf = 0.;
+_Q_pump_buf  = 0.;
+_DP_buf      = 0.;
+_DT_mon      = 10.;
+_dQ_spike    = 0.5;
+
+LAYOUT
+CH1/i - BVOL_T1;
+CH1(2) - CPUMP1;
+CH1(3) - VAL1;
+CH1(4) - LR1;
+CH1/o - BVOL_T1;
+END
+
+! CALLs
+CALL _Ch;
+CALL _Bv;
+CALL _Lr;
+CALL _Val;
+CALL _Pmp;
+
+! SETs
+SET _DtHandle;
+SET _Actions;
+SET _CalcSensor;
+SET _Monitor;
+
+! OUTs
+OUT _Res;
+
+END
+
+!!bb DATAs
+
+DATA _Ch
+  MDL = 'CH';
+  ELS = 1;
+  IF(NV==1) THEN
+    N = _n0;                       ! В канале 3 последовательные ячейки
+    TYPE  = 0;
+    
+    ! расчитываем площади сечения (S) для каждой ячейки:
+    S(1) = (_pi*(0.050**2))/4;    ! Ячейка 1: DN50 (внутренний диаметр 50 мм)
+    S(2) = (_pi*(0.050**2))/4;    ! Ячейка 2: DN50 (внутренний диаметр 50 мм)
+    S(3) = (_pi*(0.100**2))/4;    ! Ячейка 3: DN100 (внутренний диаметр 100 мм)
+    
+    ! Задаем периметры (PR) для каждой ячейки:
+    PR(1) = _pi*0.050;           ! Периметр ячейки 1
+    PR(2) = _pi*0.050;           ! Периметр ячейки 2
+    PR(3) = _pi*0.100;           ! Периметр ячейки 3
+    
+    DZ(1:3) = 1.0;               ! Длина каждой ячейки составляет ровно по 1 м
+    DH(1:3) = 0.;
+    ROU = 2e-5;
+    P = 1.*_MPa;                 ! Давление 1 МПа по заданию
+    T(1,1:N) = 20.+_t0C;         ! Температура воды 20 градусов Цельсия
+    T(2,1:N) = 20.+_t0C;
+    VOID = 0;
+    XNG(1,1:N) = _xgAir(1);
+    XNG(2,1:N) = _xgAir(2);
+    XNG(3,1:N) = _xgAir(3);
+    XNG(4,1:N) = _xgAir(4);
+  ENDIF
+END
+
+DATA _Bv
+  MDL = 'BVOL_T';
+  ELS = 1;
+  IF(NV==1) THEN
+    P = 1.*_MPa;
+    VOID = 0.;
+    T = 20.+_t0C;
+    XNG = _xgAir;
+  ENDIF
+END
+
+DATA _Lr
+  MDL = 'LR';
+  ELS = 1;
+  IF(NV==1) THEN
+    CSI1 = 140.;                 ! Базовый КГС местного сопротивления (потребителя)
+    CSI2 = 1400.;
+  ENDIF
+END
+
+DATA _Val 
+  MDL = 'VAL';
+  ELS = 1;
+  IF(NV==1) THEN
+    K = 5;                       ! 5 точек аппроксимации характеристики  К
+    
+    ! Задаем паспортную линейную характеристику регулирующего клапана:
+    ! Столбец 1 - положение штока, Столбец 2 - расход вперед, Столбец 3 - расход назад
+    F(1,1) = 0.0;  F(1,2) = 0.0;  F(1,3) = 0.0;  ! Полностью закрыт
+    F(2,1) = 0.25; F(2,2) = 0.25; F(2,3) = 0.25; ! Открыт на 25%
+    F(3,1) = 0.50; F(3,2) = 0.50; F(3,3) = 0.50; ! Открыт на 50%
+    F(4,1) = 0.75; F(4,2) = 0.75; F(4,3) = 0.75; ! Открыт на 75%
+    F(5,1) = 1.0;  F(5,2) = 1.0;  F(5,3) = 1.0;  ! Полностью открыт
+    
+    CSI1 = 1.0;
+    S = 0.0;                     ! Начальное положение штока на старте симуляции (100% открыт)
+    LS(1) = 0.;
+    LS(2) = 1.;
+  ENDIF
+END
+
+DATA _Pmp
+  MDL = 'CPUMP';
+  ELS = 1;
+  IF(NV==1) THEN
+    MODE = 2;                  ! Модель насоса отключена, напор задается процедурой EVENT
+  ENDIF
+END
+
+
+!!bb EVENTs
+
+EVENT _DtHandle
+  TYPE = 0;
+  REPLACE = 1;
+  TURN_ON = 1;
+  IF (TAU>0.) THEN
+    dt_max = 0.01;
+  ENDIF
+  IF (TAU>0.)&(TAU<=3.) THEN
+    dt_max = 0.01;
+    dt_out = 0.1;
+    dt_diag = 10.;
+  ENDIF
+  IF (TAU>3.) THEN
+    dt_max = 0.01;
+    dt_out = 10.;
+    dt_diag = 10.;
+  ENDIF
+  
+END
+
+EVENT _Actions
+  TYPE = 0;
+  REPLACE = 1;
+  TURN_ON = 1;
+  IF (TAU >= _T_begin) THEN
+    _S_val = MIN(_S_max, _S_start+(_S_max - _S_start)*(TAU - _T_begin)/_T_ramp);
+    S.VAL1 = _S_val;
+  ELSE
+    S.VAL1 = _S_start;
+  ENDIF
+    ! --- Вызов _Monitor ---
+  IF (TAU>0.) THEN
+    CALL _Monitor(0.5);
+  ENDIF 
+END
+
+EVENT _CalcSensor     
+  TYPE = 0;
+  REPLACE = 1;
+  TURN_ON = 1;
+  ! 1. Массовый расход через насос (соединение 2 канала CH1)
+  _G_pump = "($W.CH1(1,2),1);
+
+  ! 2. Перевод массового расхода в объёмный, м3/ч
+  _Q_pump_curr = _G_pump / _RHO_W * 3600.;
+
+  ! 3. Интерполяция напора по таблице H(Q) 
+  _H_pump_curr = LINS(_H_pump, _Q_pump, _NH_pump, _Q_pump_curr);
+
+  ! 4. Присвоение напора насосу (в Па) 
+  DP.CPUMP1 = _H_pump_curr * _RHO_W * _gg;
+
+  ! 5. Массовый расход через клапан (соединение 3 канала CH1)
+  _G_valve = "($W.CH1(1,3),1);
+
+  ! 6. Объёмный расход через клапан 
+  _Q_valve = _G_valve / _RHO_W * 3600.;
+END
+ 
+EVENT _Monitor(_dt)
+  TURN_ON = 1;
+  ! --- 1. Разовая инициализация счётчиков ---
+  IF _FIRST_mon == 1 THEN
+    _FIRST_mon    = 0;
+    _N_call_mon   = 0;
+    _N_spike_mon  = 0;
+    _Q_valve_old  = 0.;
+    _TAU_mon_old  = 0.;
+  ENDIF
+
+  ! --- 2. Учёт вызовов ---
+  _N_call_mon = _N_call_mon + 1;
+
+  ! --- 3. Контроль скачков расхода между соседними шагами ---
+  IF ABS(_Q_valve - _Q_valve_old) > _dQ_spike THEN
+    _N_spike_mon = _N_spike_mon + 1;
+  ENDIF
+  _Q_valve_old = _Q_valve;
+
+  ! --- 4. Периодический сброс «буфера» и запись в KORLIS ---
+  IF (TAU - _TAU_mon_old) >= _DT_mon THEN
+    _TAU_mon_old = TAU;
+
+    ! Буфер текущего состояния (доступен другим процедурам)
+    _S_val_buf   = _S_val;
+    _Q_valve_buf = _Q_valve;
+    _Q_pump_buf  = _Q_pump_curr;
+    _DP_buf      = DP.CPUMP1;
+
+    ! Сообщение в файл листинга KORLIS
+    PRINT 'MON t=', TAU, ' S=', _S_val, ' Qv=', _Q_valve,
+        ' Qp=', _Q_pump_curr, ' DP=', DP.CPUMP1;
+  ENDIF
+  
+END
+
+
+!!bb OUTPUTs
+OUTPUT _Res
+  ! Строка данных
+  WRITE  _S_val, _Q_valve, _Q_pump_curr, DP.CPUMP1, P.CH1(2), P.CH1(3);
+END
